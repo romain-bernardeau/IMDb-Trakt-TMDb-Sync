@@ -386,7 +386,7 @@ func (c *client) listDownload(resource *rod.Element) (*List, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failure extracting href from hyperlink: %w", err)
 	}
-	lid, err := idExtract(*href)
+	lid, err := c.exportListID(*href)
 	if err != nil {
 		return nil, fmt.Errorf("failure extracting list id from href: %w", err)
 	}
@@ -553,22 +553,15 @@ func (c *client) filterResources(resources rod.Elements, ids ...string) (rod.Ele
 			return nil, fmt.Errorf("failure extracting href from resource hyperlink: %w", err)
 		}
 		seen = append(seen, *href)
-		lid := ""
-		if isListHyperlink(*href) {
-			if lid, err = idExtract(*href); err != nil {
-				return nil, fmt.Errorf("failure extracting list id: %w", err)
-			}
-		} else if isWatchlistHyperlink(*href) {
-			// Newer IMDb profiles link the watchlist export to /user/<id>/watchlist instead of /list/ls...
-			lid = c.watchlistID
+		lid, err := c.exportListID(*href)
+		if err != nil {
+			return nil, fmt.Errorf("failure extracting list id: %w", err)
 		}
 		if lid != "" && !uniqueResources[lid] && slices.Contains(ids, lid) {
 			uniqueResources[lid] = true
 			filteredResources = append(filteredResources, r)
 		}
-		if wantRatings && isAnyRatingsHyperlink(*href) {
-			// The exports page only lists the signed-in user's exports; newer profiles (p.xxx) link
-			// the ratings export with another user id or a language prefix
+		if wantRatings && isRatingsHyperlink(normalizeHref(*href), c.userID) {
 			return rod.Elements{r}, nil
 		}
 	}
@@ -713,22 +706,34 @@ func (c *client) handleWafChallenge(tab *rod.Page) error {
 	return nil
 }
 
+// localePrefix matches the optional locale segment of a localized IMDb path: /fr/, /de/, /en-us/, /pt-br/...
+var localePrefix = regexp.MustCompile(`^/[a-z]{2}(-[a-z]{2})?/`)
+
+// normalizeHref strips the locale prefix of an IMDb path (/fr/user/... → /user/...)
+func normalizeHref(href string) string {
+	return localePrefix.ReplaceAllLiteralString(href, "/")
+}
+
+// exportListID returns the id of the list an export href points to, or "" when it is not a list.
+// Newer IMDb profiles link the watchlist export to /user/<id>/watchlist instead of /list/ls...
+func (c *client) exportListID(href string) (string, error) {
+	path := normalizeHref(href)
+	if isWatchlistHyperlink(path, c.userID) {
+		return c.watchlistID, nil
+	}
+	if isListHyperlink(path) {
+		return idExtract(path)
+	}
+	return "", nil
+}
+
 func isListHyperlink(href string) bool {
-	return listHyperlink.MatchString(href)
+	return strings.HasPrefix(href, "/list/ls")
 }
 
-var (
-	listHyperlink       = regexp.MustCompile(`^(/[a-z]{2}(-[a-z]{2})?)?/list/ls`)
-	anyRatingsHyperlink = regexp.MustCompile(`^(/[a-z]{2}(-[a-z]{2})?)?/user/[^/]+/ratings`)
-	watchlistHyperlink  = regexp.MustCompile(`^(/[a-z]{2}(-[a-z]{2})?)?/user/[^/]+/watchlist`)
-)
-
-func isAnyRatingsHyperlink(href string) bool {
-	return anyRatingsHyperlink.MatchString(href)
-}
-
-func isWatchlistHyperlink(href string) bool {
-	return watchlistHyperlink.MatchString(href)
+func isWatchlistHyperlink(href, userID string) bool {
+	prefix := fmt.Sprintf("/user/%s/watchlist", userID)
+	return strings.HasPrefix(href, prefix)
 }
 
 func isRatingsHyperlink(href, userID string) bool {
@@ -857,14 +862,8 @@ func transformData(data []byte) (Items, error) {
 	return nil, fmt.Errorf("unrecognized list type with header %s", header)
 }
 
-var listIDPattern = regexp.MustCompile(`/list/(ls\d+)`)
-
 func idExtract(href string) (string, error) {
-	// A language prefix (/fr/list/ls...) shifts the pieces
-	if m := listIDPattern.FindStringSubmatch(href); m != nil {
-		return m[1], nil
-	}
-	pieces := strings.Split(href, "/")
+	pieces := strings.Split(normalizeHref(href), "/")
 	if len(pieces) < 3 {
 		return "", fmt.Errorf("hyperlink href has unexpected format: %s", href)
 	}
