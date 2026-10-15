@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -385,7 +386,7 @@ func (c *client) listDownload(resource *rod.Element) (*List, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failure extracting href from hyperlink: %w", err)
 	}
-	lid, err := idExtract(*href)
+	lid, err := c.exportListID(*href)
 	if err != nil {
 		return nil, fmt.Errorf("failure extracting list id from href: %w", err)
 	}
@@ -536,7 +537,9 @@ func (c *client) filterResources(resources rod.Elements, ids ...string) (rod.Ele
 	for _, id := range ids {
 		uniqueResources[id] = false
 	}
+	wantRatings := slices.Contains(ids, c.userID)
 	filteredResources := make(rod.Elements, 0, len(ids))
+	seen := make([]string, 0, len(resources))
 	for _, r := range resources {
 		if len(filteredResources) == len(ids) {
 			break
@@ -549,21 +552,21 @@ func (c *client) filterResources(resources rod.Elements, ids ...string) (rod.Ele
 		if err != nil {
 			return nil, fmt.Errorf("failure extracting href from resource hyperlink: %w", err)
 		}
-		if isListHyperlink(*href) {
-			lid, err := idExtract(*href)
-			if err != nil {
-				return nil, fmt.Errorf("failure extracting list id: %w", err)
-			}
-			if !uniqueResources[lid] && slices.Contains(ids, lid) {
-				uniqueResources[lid] = true
-				filteredResources = append(filteredResources, r)
-			}
+		seen = append(seen, *href)
+		lid, err := c.exportListID(*href)
+		if err != nil {
+			return nil, fmt.Errorf("failure extracting list id: %w", err)
 		}
-		if isRatingsHyperlink(*href, c.userID) {
+		if lid != "" && !uniqueResources[lid] && slices.Contains(ids, lid) {
+			uniqueResources[lid] = true
+			filteredResources = append(filteredResources, r)
+		}
+		if wantRatings && isRatingsHyperlink(normalizeHref(*href), c.userID) {
 			return rod.Elements{r}, nil
 		}
 	}
 	if len(filteredResources) != len(ids) {
+		c.logger.Warn("imdb export links did not match", "wanted", ids, "hrefs", seen)
 		return nil, fmt.Errorf("expected the number of filtered resources to be %d, but got %d", len(ids), len(filteredResources))
 	}
 	return filteredResources, nil
@@ -703,8 +706,34 @@ func (c *client) handleWafChallenge(tab *rod.Page) error {
 	return nil
 }
 
+// localePrefix matches the optional locale segment of a localized IMDb path: /fr/, /de/, /en-us/, /pt-br/...
+var localePrefix = regexp.MustCompile(`^/[a-z]{2}(-[a-z]{2})?/`)
+
+// normalizeHref strips the locale prefix of an IMDb path (/fr/user/... → /user/...)
+func normalizeHref(href string) string {
+	return localePrefix.ReplaceAllLiteralString(href, "/")
+}
+
+// exportListID returns the id of the list an export href points to, or "" when it is not a list.
+// Newer IMDb profiles link the watchlist export to /user/<id>/watchlist instead of /list/ls...
+func (c *client) exportListID(href string) (string, error) {
+	path := normalizeHref(href)
+	if isWatchlistHyperlink(path, c.userID) {
+		return c.watchlistID, nil
+	}
+	if isListHyperlink(path) {
+		return idExtract(path)
+	}
+	return "", nil
+}
+
 func isListHyperlink(href string) bool {
 	return strings.HasPrefix(href, "/list/ls")
+}
+
+func isWatchlistHyperlink(href, userID string) bool {
+	prefix := fmt.Sprintf("/user/%s/watchlist", userID)
+	return strings.HasPrefix(href, prefix)
 }
 
 func isRatingsHyperlink(href, userID string) bool {
@@ -834,7 +863,7 @@ func transformData(data []byte) (Items, error) {
 }
 
 func idExtract(href string) (string, error) {
-	pieces := strings.Split(href, "/")
+	pieces := strings.Split(normalizeHref(href), "/")
 	if len(pieces) < 3 {
 		return "", fmt.Errorf("hyperlink href has unexpected format: %s", href)
 	}
