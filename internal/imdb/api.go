@@ -463,7 +463,7 @@ func (c *client) exportResource(url string) error {
 		return fmt.Errorf("failure finding export menu item: %w", err)
 	}
 	wait := tab.WaitRequestIdle(time.Second, []string{"pageAction=start-export"}, nil, nil)
-	if err = exportMenuItem.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	if err = c.clickElement(exportMenuItem); err != nil {
 		return fmt.Errorf("failure clicking on export menu item: %w", err)
 	}
 	wait()
@@ -482,7 +482,7 @@ func (c *client) openExportMenuItem(tab *rod.Page, actionsMenuButton *rod.Elemen
 	)
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := actionsMenuButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		if err := c.clickElement(actionsMenuButton); err != nil {
 			return nil, fmt.Errorf("failure clicking on actions menu button: %w", err)
 		}
 		exportMenuItem, err := tab.Timeout(openTimeout).ElementR(selectorActionsMenu+" li", "Export")
@@ -491,7 +491,56 @@ func (c *client) openExportMenuItem(tab *rod.Page, actionsMenuButton *rod.Elemen
 		}
 		lastErr = err
 	}
+	c.logDiagnostics(tab, actionsMenuButton)
 	return nil, fmt.Errorf("reached max retry attempts: %w", lastErr)
+}
+
+// clickElement clicks el like a user would. Since 2026-10-21 IMDb renders some
+// buttons (the list actions menu button) with pointer-events: none, which a
+// real mouse click refuses; once a short wait has not lifted it, the click is
+// dispatched from JavaScript instead, which reaches the same React handlers.
+func (c *client) clickElement(el *rod.Element) error {
+	const (
+		pollInterval = 250 * time.Millisecond
+		pollTimeout  = 5 * time.Second
+	)
+	deadline := time.Now().Add(pollTimeout)
+	for {
+		_, err := el.Interactable()
+		if !errors.Is(err, &rod.NoPointerEventsError{}) {
+			return el.Click(proto.InputMouseButtonLeft, 1)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+	c.logger.Info("element ignores pointer events, clicking it from javascript")
+	if err := el.ScrollIntoView(); err != nil {
+		return fmt.Errorf("failure scrolling element into view: %w", err)
+	}
+	if _, err := el.Eval(`() => this.click()`); err != nil {
+		return fmt.Errorf("failure clicking element from javascript: %w", err)
+	}
+	return nil
+}
+
+// logDiagnostics logs the markup around the actions menu so that the next
+// IMDb UI change can be understood from the workflow logs alone.
+func (c *client) logDiagnostics(tab *rod.Page, actionsMenuButton *rod.Element) {
+	const maxLen = 4000
+	truncate := func(s string) string {
+		if len(s) > maxLen {
+			return s[:maxLen] + "…"
+		}
+		return s
+	}
+	if res, err := actionsMenuButton.Eval(`() => (this.parentElement ?? this).outerHTML`); err == nil {
+		c.logger.Warn("imdb actions menu button markup", "html", truncate(res.Value.Str()))
+	}
+	if res, err := tab.Eval(`() => [...document.querySelectorAll("[data-testid*='actions'], [data-testid*='export'], [role='menu'], [role='menuitem']")].map(e => e.tagName.toLowerCase() + "[" + (e.dataset.testid ?? e.getAttribute("role")) + "] " + (e.textContent ?? "").trim().slice(0, 40)).join(" | ")`); err == nil {
+		c.logger.Warn("imdb actions related elements", "elements", truncate(res.Value.Str()))
+	}
 }
 
 func (c *client) waitExportsReady(tab *rod.Page, ids ...string) error {
