@@ -364,7 +364,7 @@ func (c *client) ratingsDownload(resource *rod.Element) (Items, error) {
 		return nil, fmt.Errorf("failure finding download button: %w", err)
 	}
 	wait := c.browser.MustWaitDownload()
-	if err = downloadButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	if err = c.clickElement(downloadButton); err != nil {
 		return nil, fmt.Errorf("failure clicking on download button: %w", err)
 	}
 	data := wait()
@@ -399,7 +399,7 @@ func (c *client) listDownload(resource *rod.Element) (*List, error) {
 		return nil, fmt.Errorf("failure finding download button: %w", err)
 	}
 	wait := c.browser.MustWaitDownload()
-	if err = downloadButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	if err = c.clickElement(downloadButton); err != nil {
 		return nil, fmt.Errorf("failure clicking on download button: %w", err)
 	}
 	items, err := transformData(wait())
@@ -448,7 +448,7 @@ func (c *client) exportResource(url string) error {
 	hasExportButton, exportButton, _ := tab.Has(selectorExportButton)
 	if hasExportButton {
 		wait := tab.WaitRequestIdle(time.Second, []string{"pageAction=start-export"}, nil, nil)
-		if err = exportButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		if err = c.clickElement(exportButton); err != nil {
 			return fmt.Errorf("failure clicking on export button: %w", err)
 		}
 		wait()
@@ -496,13 +496,13 @@ func (c *client) openExportMenuItem(tab *rod.Page, actionsMenuButton *rod.Elemen
 }
 
 // clickElement clicks el like a user would. Since 2026-10-21 IMDb renders some
-// buttons (the list actions menu button) with pointer-events: none, which a
-// real mouse click refuses; once a short wait has not lifted it, the click is
-// dispatched from JavaScript instead, which reaches the same React handlers.
+// buttons (list actions menu, export download buttons) with pointer-events:
+// none, which a real mouse click refuses; once a short wait has not lifted it,
+// the click is dispatched from JavaScript, which reaches the same handlers.
 func (c *client) clickElement(el *rod.Element) error {
 	const (
 		pollInterval = 250 * time.Millisecond
-		pollTimeout  = 5 * time.Second
+		pollTimeout  = 2 * time.Second
 	)
 	deadline := time.Now().Add(pollTimeout)
 	for {
